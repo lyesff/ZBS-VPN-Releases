@@ -1,0 +1,103 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  # Use the reviewed cgo compiler; do not silently select another toolchain.
+  GOTOOLCHAIN: local
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.8"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+      - name: Install Android SDK and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?The GitHub runner must provide Android SDK}"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      # Stable signing identity: all four credentials must be configured once.
+      - name: Prepare persistent signing (optional)
+        shell: bash
+        env:
+          SIGNING_B64: ${{ secrets.AUTOWARP_SIGNING_KEYSTORE_B64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.AUTOWARP_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.AUTOWARP_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.AUTOWARP_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$SIGNING_B64" && -n "$SIGNING_STORE_PASSWORD" && -n "$SIGNING_KEY_ALIAS" && -n "$SIGNING_KEY_PASSWORD" ]]; then
+            KEYSTORE_FILE="$RUNNER_TEMP/autowarp-upload.jks"
+            printf '%s' "$SIGNING_B64" | base64 --decode > "$KEYSTORE_FILE"
+            chmod 600 "$KEYSTORE_FILE"
+            keytool -list -keystore "$KEYSTORE_FILE" -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_KEY_ALIAS" >/dev/null
+            {
+              echo "AUTOWARP_KEYSTORE=$KEYSTORE_FILE"
+              echo "AUTOWARP_STORE_PASSWORD=$SIGNING_STORE_PASSWORD"
+              echo "AUTOWARP_KEY_ALIAS=$SIGNING_KEY_ALIAS"
+              echo "AUTOWARP_KEY_PASSWORD=$SIGNING_KEY_PASSWORD"
+              echo "AUTOWARP_SIGNING_MODE=persistent"
+            } >> "$GITHUB_ENV"
+          elif [[ -z "$SIGNING_B64" && -z "$SIGNING_STORE_PASSWORD" && -z "$SIGNING_KEY_ALIAS" && -z "$SIGNING_KEY_PASSWORD" ]]; then
+            echo "AUTOWARP_SIGNING_MODE=ephemeral" >> "$GITHUB_ENV"
+            echo "::warning::No persistent signing key: this debug APK may not update the previously installed app."
+          else
+            echo "::error::Incomplete AutoWARP signing secrets. Configure all four or none."
+            exit 1
+          fi
+      - name: Build libbox Android library
+        run: bash core/build.sh
+      - name: Test Go subscription import
+        run: |
+          set -euo pipefail
+          cp core/profiles_test.go .core-build/sing-box/experimental/libbox/autowarp_profiles_test.go
+          cd .core-build/sing-box
+          CGO_ENABLED=0 go test -buildvcs=false -ldflags="-checklinkname=0" -tags with_gvisor,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0 -timeout=90s -run 'Test(Subscriptions|MixedProtocolSubscription|NestedProviderOutboundsSubscription|NestedProviderOpaqueStringsNotTreatedAsServers|MihomoConvertedVlessSettingsSurviveImport|XrayNestedProviderVLESS|XrayUnsupportedTransportIsNotDowngraded|XrayPlaintextIsNotImportedAsTLS)' ./experimental/libbox
+      - name: Test and build APK
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+      - name: Verify APK signature and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          sha256sum "$APK" > app-debug.apk.sha256
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          echo "Signing mode: $AUTOWARP_SIGNING_MODE"
+          if [[ "$AUTOWARP_SIGNING_MODE" != "persistent" ]]; then
+            echo "::warning::Ephemeral debug signature: back up WARP credentials before uninstalling."
+          fi
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoWARP-${{ env.AUTOWARP_SIGNING_MODE }}-debug
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app-debug.apk.sha256
+          if-no-files-found: error

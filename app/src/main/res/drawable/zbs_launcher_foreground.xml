@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Artwork kept inside adaptive icon safe zone. -->
+    <path android:pathData="M 26,42 L 34,32 L 81,32 L 66,48 L 49,65 L 81,65 L 72,76 L 26,76 L 45,55 L 57,42 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient xmlns:android="http://schemas.android.com/apk/res/android"
+                android:startX="29" android:startY="38" android:endX="78" android:endY="75"
+                android:type="linear" android:startColor="#35DBF1" android:endColor="#52FCA3"/>
+        </aapt:attr>
+    </path>
+    <!-- Orbital path crosses the Z, not a radar crosshair. -->
+    <path android:pathData="M 32,68 C 19,74 25,80 40,77 C 57,73 84,59 88,48 C 91,41 86,39 78,43"
+          android:strokeColor="#30EBEC" android:strokeWidth="3.3"
+          android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <path android:pathData="M 58,72 C 73,65 85,56 88,48"
+          android:strokeColor="#70F969" android:strokeWidth="3.2"
+          android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <path android:pathData="M 78,43 m -3.3,0 a 3.3,3.3 0,1 0,6.6 0 a 3.3,3.3 0,1 0,-6.6 0"
+          android:fillColor="#B6FF83"/>
+</vector>
