@@ -20,12 +20,16 @@ internal class AwgResourceOwner<T:Any,E:Any>(
         if(!accepted)closeEngine(value)
         return accepted
     }
-    fun close(){
+    /** Release a failed attempt; final close still rejects all late installs. */
+    fun releaseAttempt()=release(false)
+    fun close()=release(true)
+    private fun release(permanent:Boolean){
         val pair=synchronized(lock){
             if(closed)return
-            closed=true
+            if(permanent)closed=true
             (tun to engine).also {tun=null;engine=null}
         }
         try{pair.second?.let(closeEngine)}finally{pair.first?.let(closeTun)}
     }
 }
+

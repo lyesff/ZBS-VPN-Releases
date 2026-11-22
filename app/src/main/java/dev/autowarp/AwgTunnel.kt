@@ -18,6 +18,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.os.PowerManager
+import android.os.Build
+import androidx.core.content.ContextCompat
+import org.json.JSONObject
 import android.util.Log
 import io.nekohasekai.awglab.Awglab
 import io.nekohasekai.awglab.AndroidVPN
@@ -47,10 +51,11 @@ import java.util.concurrent.atomic.AtomicReference
  */
 class AwgTunnel:VpnService(),SocketProtector{
     companion object{
-        fun start(c:Context,appOnly:Boolean=false,routerI1:Boolean=false,nestedTest:Boolean=false){
+        fun start(c:Context,appOnly:Boolean=false,routerI1:Boolean=false,nestedTest:Boolean=false,maskVariant:String=""){
             c.startForegroundService(Intent(c,AwgTunnel::class.java)
                 .setAction("START_AWG").putExtra("AWG_APP_ONLY",appOnly)
-                .putExtra("AWG_ROUTER_I1",routerI1).putExtra("AWG_NESTED_TEST",nestedTest))
+                .putExtra("AWG_ROUTER_I1",routerI1).putExtra("AWG_NESTED_TEST",nestedTest)
+                .putExtra("AWG_MASK_VARIANT",maskVariant))
         }
     }
     private val cm by lazy { getSystemService(ConnectivityManager::class.java) }
@@ -66,7 +71,11 @@ class AwgTunnel:VpnService(),SocketProtector{
     private var goControlStarted=false
     @Volatile private var lastAppOnly=false
     @Volatile private var lastRouterI1=false
+    @Volatile private var lastMaskVariant=""
     private var networkCallbackRegistered=false
+    private var backgroundReceiverRegistered=false
+    @Volatile private var lastNotificationState:Pair<Phase,Reason>?=null
+    @Volatile private var lastSuspended:Boolean?=null
     private var preferredNetworkHandle=0L
     private val wifiProbeRunning=AtomicBoolean(false)
     @Volatile private var lastWifiProbeAt=0L
@@ -135,7 +144,36 @@ class AwgTunnel:VpnService(),SocketProtector{
         }
         override fun onAvailable(network:Network)=changed()
         override fun onLost(network:Network)=changed()
-        override fun onCapabilitiesChanged(network:Network,caps:NetworkCapabilities)=changed()
+        override fun onCapabilitiesChanged(network:Network,caps:NetworkCapabilities){
+            if(network==underlyingPhysical && !closing.get()){
+                val suspended=!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)
+                if(lastSuspended!=suspended){
+                    lastSuspended=suspended
+                    journal(if(suspended)"awg_vpn_network_suspended" else "awg_vpn_network_resumed")
+                }
+            }
+            changed()
+        }
+        override fun onBlockedStatusChanged(network:Network,blocked:Boolean){
+            if(network==underlyingPhysical && !closing.get()){
+                journal(if(blocked)"awg_vpn_network_blocked" else "awg_vpn_network_unblocked")
+                recordBackgroundState()
+            }
+        }
+    }
+    private val backgroundReceiver=object:BroadcastReceiver(){
+        override fun onReceive(context:Context,intent:Intent){
+            if(closing.get())return
+            when(intent.action){
+                Intent.ACTION_SCREEN_OFF->journal("awg_screen_off")
+                Intent.ACTION_SCREEN_ON->journal("awg_screen_on")
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED->{
+                    val power=getSystemService(PowerManager::class.java)
+                    journal(if(power.isDeviceIdleMode)"awg_idle_enter" else "awg_idle_exit")
+                }
+            }
+            recordBackgroundState()
+        }
     }
     private val checking=AtomicBoolean(false)
     @Volatile private var underlyingPhysical:Network?=null
@@ -143,6 +181,7 @@ class AwgTunnel:VpnService(),SocketProtector{
         closeTun={it.close()},closeEngine={it.stop()})
     private val session=VpnSession { state->
         sendBroadcast(VpnIpc.intent(this,VpnIpc.UPDATE).putExtras(VpnIpc.encode(state)),VpnIpc.PERMISSION)
+        updateNotification(state)
     }
     private val control=object:BroadcastReceiver(){
         override fun onReceive(context:Context,intent:Intent){
@@ -151,8 +190,9 @@ class AwgTunnel:VpnService(),SocketProtector{
                 return
             }
             when(intent.getStringExtra("command")){
-                "STOP"->stop(Reason.IDLE)
+                "STOP"->{journal("awg_vpn_user_stop");stop(Reason.IDLE)}
                 "CHECK"->checkCurrentRoute()
+                "REFRESH_NOTIFICATION"->{updateNotification(session.value,force=true);recordBackgroundState()}
             }
         }
     }
@@ -170,19 +210,64 @@ class AwgTunnel:VpnService(),SocketProtector{
         journal(if(ok)"awg_vpn_udp_bound" else "awg_vpn_udp_bind_failed")
         return ok
     }
+    private fun notification(state:Live):Notification{
+        val open=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE)
+        return Notification.Builder(this,"vpn")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setContentTitle("ZBS VPN")
+            .setContentText(state.state)
+            .setCategory(Notification.CATEGORY_SERVICE).setOnlyAlertOnce(true)
+            .setContentIntent(open).setOngoing(true).build()
+    }
+    private fun updateNotification(state:Live,force:Boolean=false){
+        val key=state.phase to state.reason
+        if(!force && lastNotificationState==key)return
+        lastNotificationState=key
+        runCatching{getSystemService(NotificationManager::class.java).notify(11,notification(state))}
+    }
+    private fun recordBackgroundState(){
+        runCatching{
+            val power=getSystemService(PowerManager::class.java)
+            val manager=getSystemService(NotificationManager::class.java)
+            val notifications=manager.areNotificationsEnabled() &&
+                manager.getNotificationChannel("vpn")?.importance!=NotificationManager.IMPORTANCE_NONE
+            val exempt=power.isIgnoringBatteryOptimizations(packageName)
+            val network=underlyingPhysical ?: physical()
+            val caps=network?.let{cm.getNetworkCapabilities(it)}
+            val type=when{
+                network==null->"none"
+                caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)==true->"wifi"
+                caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)==true->"cellular"
+                else->"other"
+            }
+            store.edit{it.put("awgBackgroundState",JSONObject()
+                .put("at",System.currentTimeMillis()).put("elapsed_ms",SystemClock.elapsedRealtime())
+                .put("sdk",Build.VERSION.SDK_INT).put("interactive",power.isInteractive)
+                .put("idle",power.isDeviceIdleMode).put("power_save",power.isPowerSaveMode)
+                .put("battery_exempt",exempt).put("notifications_allowed",notifications).put("network",type))}
+            journal(if(exempt)"awg_battery_exempt" else "awg_battery_optimized")
+            journal(if(notifications)"awg_notifications_enabled" else "awg_notifications_disabled")
+        }
+    }
     override fun onCreate(){
         super.onCreate()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel("vpn","VPN",NotificationManager.IMPORTANCE_LOW))
-        val open=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE)
-        val notification=Notification.Builder(this,"vpn")
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setContentTitle("ZBS VPN · AWG")
-            .setContentText("Экспериментальный VPN")
-            .setContentIntent(open).setOngoing(true).build()
-        startForeground(11,notification)
+            NotificationChannel("vpn","VPN",NotificationManager.IMPORTANCE_LOW).apply{
+                setSound(null,null);enableVibration(false)
+            })
+        startForeground(11,notification(Live(Phase.CONNECTING,Reason.START)))
         VpnIpc.register(this,control,IntentFilter(VpnIpc.QUERY).apply {addAction(VpnIpc.CONTROL)})
         registered=true
+        try{
+            ContextCompat.registerReceiver(this,backgroundReceiver,IntentFilter().apply{
+                addAction(Intent.ACTION_SCREEN_OFF);addAction(Intent.ACTION_SCREEN_ON)
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+                addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            },ContextCompat.RECEIVER_NOT_EXPORTED)
+            backgroundReceiverRegistered=true
+            journal("awg_background_monitor_started")
+        }catch(_:Exception){journal("awg_background_monitor_unavailable")}
+        recordBackgroundState()
         try{
             val request=NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -202,7 +287,12 @@ class AwgTunnel:VpnService(),SocketProtector{
         preferredNetworkHandle=i?.getLongExtra("AWG_PHYSICAL_NETWORK",0L) ?: 0L
         lastAppOnly=appOnly
         lastRouterI1=routerI1
-        worker.execute{if(nestedTest)runNestedTest(routerI1) else runPrototype(appOnly,routerI1)}
+        val maskVariant=i?.getStringExtra("AWG_MASK_VARIANT").orEmpty()
+        lastMaskVariant=maskVariant
+        worker.execute{
+            try{if(nestedTest)runNestedTest(routerI1) else runPrototype(appOnly,routerI1,maskVariant)}
+            catch(_:Exception){if(!closing.get())stop(Reason.NO_EXIT)}
+        }
         return START_STICKY
     }
     private fun journal(code:String,error:String="",index:Int=0,latency:Long=-1L){
@@ -306,23 +396,93 @@ class AwgTunnel:VpnService(),SocketProtector{
             if(!closing.get())stop(Reason.IDLE)
         }
     }
-    private fun runPrototype(appOnly:Boolean,routerI1:Boolean){
+    private fun runPrototype(appOnly:Boolean,routerI1:Boolean,maskVariant:String){
+        // Diagnostics retain their explicit legacy arguments; the home screen
+        // supplies a stable mode ID. Auto selection belongs to the service so
+        // leaving/recreating the Activity cannot stop it or launch another VPN.
+        val mode=AwgConnectMode.entries.firstOrNull{it.id==maskVariant}
+        val policy=store.read()
+        val network=physical()
+        val caps=network?.let{cm.getNetworkCapabilities(it)}
+        val cacheKey=when{
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)==true->"awgLastMaskWifi"
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)==true->"awgLastMaskCellular"
+            else->"awgLastMaskOther"
+        }
+        val plan=if(mode==null)listOf(if(routerI1)AwgConnectMode.I1 else AwgConnectMode.PROFILE)
+            else AwgConnectMode.plan(mode,policy.optBoolean("awgImported"),policy.optString(cacheKey))
+        val deadline=SystemClock.elapsedRealtime()+AwgConnectMode.AUTO_TIMEOUT_MS
+        val timeout=Runnable{if(!closing.get() && session.value.phase==Phase.CONNECTING)stop(Reason.START_TIMEOUT)}
+        if(mode==AwgConnectMode.AUTO)main.postDelayed(timeout,AwgConnectMode.AUTO_TIMEOUT_MS)
+        try{
+            for((index,candidate) in plan.withIndex()){
+                if(closing.get())return
+                if(mode==AwgConnectMode.AUTO && SystemClock.elapsedRealtime()>=deadline){
+                    stop(Reason.START_TIMEOUT);return
+                }
+                if(index>0){
+                    journal("awg_vpn_mask_retry",index=index+1)
+                    session.update(Live(Phase.CONNECTING,Reason.START))
+                }
+                // Every attempt owns a fresh TUN, UDP session and random I1.
+                goControlStarted=false
+                dohFailureLogged.set(false)
+                val variant=if(candidate in listOf(AwgConnectMode.QUIC,AwgConnectMode.DNS,AwgConnectMode.STUN))candidate.id else ""
+                val failure=runAttempt(appOnly,candidate==AwgConnectMode.I1,variant)
+                if(closing.get())return
+                if(failure==null){
+                    if(session.value.phase==Phase.CONNECTED){
+                        // Only final Android HTTPS verification may teach Auto.
+                        // Do not associate a result with a different physical network.
+                        if(underlyingPhysical==network)runCatching{store.edit{it.put(cacheKey,candidate.id)}}
+                    }
+                    return
+                }
+                runCatching{dohClient.getAndSet(null)?.close()}
+                runCatching{resources.releaseAttempt()}
+                underlyingPhysical=null
+                if(mode!=AwgConnectMode.AUTO || failure!=Reason.NO_EXIT || index==plan.lastIndex){
+                    stop(failure);return
+                }
+                // Wait for Android to remove our failed VPN before the next
+                // protected preflight. Never start over an existing VPN.
+                val removedBy=SystemClock.elapsedRealtime()+3000L
+                while(!closing.get() && SystemClock.elapsedRealtime()<removedBy &&
+                    cm.allNetworks.any{cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN)==true}){
+                    Thread.sleep(100)
+                }
+            }
+        }catch(_:Exception){
+            if(!closing.get())stop(Reason.NO_EXIT)
+        }finally{main.removeCallbacks(timeout)}
+    }
+    /** null means a verified connection (or a completed app-only diagnostic). */
+    private fun runAttempt(appOnly:Boolean,routerI1:Boolean,maskVariant:String):Reason?{
         journal("awg_vpn_start")
         journal(if(appOnly)"awg_vpn_scope_app" else "awg_vpn_scope_all")
-        journal(if(routerI1)"awg_vpn_mask_router_i1" else "awg_vpn_mask_original")
+        val maskEvent=when(maskVariant){
+            "quic"->"awg_vpn_mask_quic"
+            "dns"->"awg_vpn_mask_dns"
+            "stun"->"awg_vpn_mask_stun"
+            else->if(routerI1)"awg_vpn_mask_router_i1" else "awg_vpn_mask_original"
+        }
+        journal(maskEvent)
         try{
             if(prepare(this)!=null)error("permission_revoked")
             val network=physical() ?: error("no_physical_network")
             val quick=store.read().optString("awgQuick")
             require(Awglab.validateQuickFile(quick))
-            val effective=if(routerI1){
+            require(maskVariant in setOf("","quic","dns","stun")) { "awg_mask_unknown_variant" }
+            val effective=if(maskVariant.isNotEmpty()){
+                AwgMasking.withI1(quick,AwgMaskPackets.signature(maskVariant))
+            }else if(routerI1){
                 val signature=assets.open("warp-router-i1.cps").bufferedReader().use{it.readText().trim()}
                 AwgMasking.withI1(quick,signature)
             }else quick
             require(Awglab.validateQuickFile(effective))
             val resolved=resolveEndpoint(effective,network)
             val address=ipv4(resolved)
-            if(closing.get())return
+            if(closing.get())return null
             underlyingPhysical=network
             // Compare the same protected transport before Android changes routes.
             // Never run a netstack probe through an already established VPN.
@@ -331,8 +491,7 @@ class AwgTunnel:VpnService(),SocketProtector{
             }
             if(existingVPN){
                 journal("awg_vpn_failed","awg_vpn_existing_vpn")
-                stop(Reason.NO_EXIT)
-                return
+                return Reason.DENIED
             }
             val policy=store.read()
             val dnsProvider=AwgDnsPolicy.selected(policy)
@@ -353,17 +512,17 @@ class AwgTunnel:VpnService(),SocketProtector{
                 preparedSession.close()
                 error("awg_prepare_already_active")
             }
-            if(closing.get())return
+            if(closing.get())return null
             journal("awg_vpn_transport_preflight_start")
             val outcome=runCatching{preparedSession.probeWarp()}.getOrDefault("awg_https_failed")
-            if(closing.get())return
+            if(closing.get())return null
             journal("awg_vpn_transport_preflight",outcome)
             // Keep the isolated non-WARP CI adapter path. It cannot pass the
             // mandatory final Android warp=on/plus verifier below.
             if(!outcome.startsWith("awg_verified:") && outcome!="awg_not_confirmed")
                 throw AwgVerifyFailure("awg_vpn_preflight_failed",AwgVerifyStage.TRACE)
-            val prepared=preparing.get() ?: return
-            if(closing.get())return
+            val prepared=preparing.get() ?: return null
+            if(closing.get())return null
             verifyRegion(prepared.countryCode())
             verifyNode(prepared.coloCode())
             setUnderlyingNetworks(arrayOf(network))
@@ -377,16 +536,16 @@ class AwgTunnel:VpnService(),SocketProtector{
                 .setUnderlyingNetworks(arrayOf(network))
             if(appOnly)builder.addAllowedApplication(packageName)
             val pfd=builder.establish() ?: error("tun_establish_failed")
-            if(!resources.installTun(pfd))return
+            if(!resources.installTun(pfd))return null
             journal("awg_vpn_tun")
-            if(closing.get())return
+            if(closing.get())return null
             // Android routes are active, but the AWG frontend is still the
             // same private netstack. Isolate route activation from IP handoff.
             journal("awg_vpn_transport_state",prepared.transportState())
             journal("awg_vpn_post_tun_start")
             val afterTUN=runCatching{prepared.probeWarpAfterTUN()}
                 .getOrDefault("awg_https_failed")
-            if(closing.get())return
+            if(closing.get())return null
             journal("awg_vpn_post_tun",afterTUN)
             journal("awg_vpn_post_tun_udp",prepared.postTUNUDPState())
             verifyRegion(prepared.countryCode())
@@ -403,7 +562,7 @@ class AwgTunnel:VpnService(),SocketProtector{
             }
             if(dns!=null){
                 dohClient.set(dns)
-                if(closing.get()){dohClient.getAndSet(null)?.close();return}
+                if(closing.get()){dohClient.getAndSet(null)?.close();return null}
                 journal("awg_doh_start")
             }
             val dup=ParcelFileDescriptor.dup(pfd.fileDescriptor)
@@ -411,8 +570,8 @@ class AwgTunnel:VpnService(),SocketProtector{
             val engine=if(dns==null)prepared.start(rawFd.toLong()) else prepared.startWithDNS(rawFd.toLong(),dns)
             preparing.compareAndSet(prepared,null)
             runCatching{prepared.close()}
-            if(!resources.installEngine(engine))return
-            if(closing.get())return
+            if(!resources.installEngine(engine))return null
+            if(closing.get())return null
             dohClient.get()?.let{dns->
                 // Check HTTPS DNS through WARP before advertising CONNECTED.
                 // No direct/system fallback is allowed on failure.
@@ -431,7 +590,7 @@ class AwgTunnel:VpnService(),SocketProtector{
             var deepestFailure:AwgVerifyFailure?=null
             var handshakeLogged=false
             for(attempt in 0 until 3){
-                if(closing.get())return
+                if(closing.get())return null
                 if(engine.hasHandshake() && !handshakeLogged){
                     journal("awg_vpn_handshake")
                     handshakeLogged=true
@@ -458,7 +617,7 @@ class AwgTunnel:VpnService(),SocketProtector{
                 if(!closing.get() && engine.udpLoopCount()==0L &&
                     !AwgRegionPolicy.rejection(deepestFailure?.code.orEmpty()))
                     goTLSControl(engine,"awg_vpn_go_after")
-                if(closing.get())return
+                if(closing.get())return null
                 // Snapshot only aggregate packet counts, never UAPI/keys/traffic.
                 // This pinpoints a missing Android->TUN path vs no decrypted response.
                 val counts=runCatching{
@@ -473,16 +632,15 @@ class AwgTunnel:VpnService(),SocketProtector{
                 journal("awg_vpn_flow",flow)
                 journal("awg_vpn_udp_flow",awgUDPFlowCode(engine.packetCounters(),engine.udpLoopCount()))
                 journal("awg_vpn_failed",deepestFailure?.code ?: "awg_vpn_http_failed")
-                stop(AwgRegionPolicy.reason(deepestFailure?.code.orEmpty()))
-                return
+                return AwgRegionPolicy.reason(deepestFailure?.code.orEmpty())
             }
-            if(closing.get())return
+            if(closing.get())return null
             if(appOnly){
                 // This diagnostic never advertises a connected system VPN.
                 // Both TLS controls and the actual Android verifier are kept.
                 journal("awg_vpn_app_only_verified")
                 stop(Reason.IDLE)
-                return
+                return null
             }
             journal("awg_vpn_verified")
             val start=SystemClock.elapsedRealtime()
@@ -496,13 +654,14 @@ class AwgTunnel:VpnService(),SocketProtector{
             }
         }catch(e:AwgVerifyFailure){
             journal("awg_vpn_failed",e.code)
-            if(!closing.get())stop(AwgRegionPolicy.reason(e.code))
+            return AwgRegionPolicy.reason(e.code)
         }catch(_:Exception){
             journal("awg_vpn_failed","awg_vpn_start_failed")
-            if(!closing.get())stop(Reason.NO_EXIT)
+            return if(prepare(this)!=null)Reason.REVOKED else Reason.NO_EXIT
         }finally{
             runCatching{preparing.getAndSet(null)?.close()}
         }
+        return null
     }
     private fun verifyRegion(raw:String){
         val country=AwgRegionPolicy.country(raw)
@@ -567,9 +726,10 @@ class AwgTunnel:VpnService(),SocketProtector{
                     val current=session.value
                     if(!closing.get() && current.phase==Phase.CONNECTED)
                         session.update(current.copy(ip=verified.ip,ms=verified.latency,country=verified.country))
-                }catch(_:Exception){
+                }catch(e:Exception){
                     failures++
-                    journal("awg_vpn_watchdog_failed",index=failures)
+                    journal("awg_vpn_watchdog_failed",if(e is AwgVerifyFailure)e.code else "awg_vpn_start_failed",index=failures)
+                    recordBackgroundState()
                     if(failures>=2 && !closing.get()){
                         session.update(Live(Phase.CONNECTING,Reason.RECOVER))
                         stop(Reason.RECOVER,restart=true)
@@ -657,6 +817,7 @@ class AwgTunnel:VpnService(),SocketProtector{
     }
     private fun stop(reason:Reason,restart:Boolean=false,preferred:Network?=null){
         if(!closing.compareAndSet(false,true))return
+        if(restart)journal("awg_vpn_recovery_start")
         session.beginStop(if(reason==Reason.IDLE)Reason.STOP else reason)
         // Native shutdown may block; run it outside the Android main thread.
         Thread({
@@ -678,6 +839,10 @@ class AwgTunnel:VpnService(),SocketProtector{
                     runCatching{cm.unregisterNetworkCallback(physicalCallback)}
                     networkCallbackRegistered=false
                 }
+                if(backgroundReceiverRegistered){
+                    runCatching{unregisterReceiver(backgroundReceiver)}
+                    backgroundReceiverRegistered=false
+                }
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 if(restart && reason==Reason.RECOVER){
@@ -685,6 +850,7 @@ class AwgTunnel:VpnService(),SocketProtector{
                     val app=applicationContext
                     val appOnly=lastAppOnly
                     val routerI1=lastRouterI1
+                    val maskVariant=lastMaskVariant
                     main.postDelayed({
                         if(runCatching{prepare(app)}.getOrNull()==null && physical()!=null){
                             runCatching{
@@ -692,6 +858,7 @@ class AwgTunnel:VpnService(),SocketProtector{
                                     .setAction("START_AWG")
                                     .putExtra("AWG_APP_ONLY",appOnly)
                                     .putExtra("AWG_ROUTER_I1",routerI1)
+                                    .putExtra("AWG_MASK_VARIANT",maskVariant)
                                     .putExtra("AWG_PHYSICAL_NETWORK",preferred?.networkHandle ?: 0L))
                             }
                         }
@@ -700,7 +867,8 @@ class AwgTunnel:VpnService(),SocketProtector{
             }
         },"awg-stop").apply{isDaemon=true;start()}
     }
-    override fun onRevoke(){stop(Reason.REVOKED)}
-    override fun onDestroy(){stop(Reason.IDLE);worker.shutdownNow();super.onDestroy()}
+    override fun onRevoke(){journal("awg_vpn_permission_revoked");stop(Reason.REVOKED)}
+    override fun onDestroy(){journal("awg_vpn_service_destroyed");stop(Reason.IDLE);worker.shutdownNow();super.onDestroy()}
 }
+
 

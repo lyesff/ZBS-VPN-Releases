@@ -6,6 +6,26 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class AwgResourceOwnerTest {
+    @Test fun retryClosesFailedAttemptBeforeInstallingFreshResources(){
+        val calls=mutableListOf<String>()
+        val owner=AwgResourceOwner<String,String>({calls.add("tun:$it")},{calls.add("engine:$it")})
+        owner.installTun("one");owner.installEngine("one")
+        owner.releaseAttempt()
+        assertNull(owner.engine())
+        assertTrue(owner.installTun("two"));assertTrue(owner.installEngine("two"))
+        owner.close();owner.releaseAttempt()
+        assertFalse(owner.installEngine("late"))
+        assertEquals(listOf("engine:one","tun:one","engine:two","tun:two","engine:late"),calls)
+    }
+    @Test fun stopBetweenAttemptsCannotReopenTheOwner(){
+        var closes=0
+        val owner=AwgResourceOwner<String,String>({closes++},{closes++})
+        owner.installTun("one")
+        owner.releaseAttempt();owner.close();owner.releaseAttempt()
+        assertFalse(owner.installTun("late"))
+        assertFalse(owner.installEngine("late"))
+        assertEquals(3,closes)
+    }
     @Test fun stopClosesEngineBeforeTunExactlyOnce(){
         val calls=mutableListOf<String>()
         val owner=AwgResourceOwner<String,String>({calls.add("tun:$it")},{calls.add("engine:$it")})
@@ -46,3 +66,4 @@ class AwgResourceOwnerTest {
         assertEquals(2,closes)
     }
 }
+

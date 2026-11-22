@@ -8,7 +8,7 @@ import org.json.JSONObject
  * WireGuard keys, URLs, UUIDs, or native exception messages.
  * Endpoint and profile names are intentionally omitted.
  */
-fun diagnosticReport(s: JSONObject, state: String): JSONObject {
+fun diagnosticReport(s: JSONObject, state: String, version:String="unknown"): JSONObject {
     val selected=s.map("wg").optJSONObject(s.optString("warp"))
     val peer=selected?.optJSONObject("config")?.optJSONArray("peers")?.optJSONObject(0)
     val reserved=peer?.optJSONArray("reserved")
@@ -31,26 +31,19 @@ fun diagnosticReport(s: JSONObject, state: String): JSONObject {
     }
     val eventExport=JSONArray()
     val history=s.optJSONArray("eventLog")
-    val knownEvents=setOf("start","network_wifi","network_cellular","network_other",
-        "network_missing","core_start","core_ready","probe_start","probe_ok","probe_fail",
-        "route_switch","route_online","route_failed","recover","stopped","core_failed",
-        "scan_start","scan_done","awg_probe_start","awg_probe_ok","awg_probe_fail",
-        "awg_doh_start","awg_doh_ready","awg_doh_failed")
-    if(history!=null)for(i in maxOf(0,history.length()-40) until history.length()){
+    if(history!=null)for(i in maxOf(0,history.length()-VpnJournalPolicy.LIMIT) until history.length()){
         val item=history.optJSONObject(i) ?: continue
         val code=item.optString("code")
-        if(code !in knownEvents)continue
+        if(code !in VpnJournalPolicy.codes)continue
         val kind=item.optString("kind").takeIf {it in setOf("WARP","VLESS","other")}.orEmpty()
-        val error=item.optString("error").takeIf {
-            it.matches(Regex("probe_(?:timeout|cancelled|dns|tls_certificate|tls_handshake|network_unreachable|host_unreachable|connection_refused|connection_reset|connection_closed|transport|trace_body|trace_ip|warp_not_confirmed|http_[0-9]{3}|unknown)"))
-        }.orEmpty()
-        eventExport.put(obj("at" to item.optLong("at",0L),"event" to code,
+        val error=VpnJournalPolicy.safeError(item.optString("error"))
+        eventExport.put(obj("at" to item.optLong("at",0L),"elapsed_ms" to item.optLong("elapsed_ms",0L).coerceAtLeast(0L),"event" to code,
             "kind" to kind,"attempt" to item.optInt("index",0).coerceIn(0,32),
             "total" to item.optInt("total",0).coerceIn(0,32),
             "latency_ms" to item.optLong("ms",-1L).coerceIn(-1L,60000L),"error" to error))
     }
     return obj(
-        "version" to "0.2.1.1",
+        "version" to version,
         "state" to state,
         "mode" to s.optString("mode","Авто"),
         "warp_profile_present" to (selected!=null),
@@ -74,6 +67,18 @@ fun diagnosticReport(s: JSONObject, state: String): JSONObject {
         "vless_nodes_count" to nodes(s).size,
         "last_checks" to checks,
         "recent_events" to eventExport,
+        "background_state" to (s.optJSONObject("awgBackgroundState")?.let{b->obj(
+            "at" to b.optLong("at",0L).coerceAtLeast(0L),
+            "elapsed_ms" to b.optLong("elapsed_ms",0L).coerceAtLeast(0L),
+            "sdk" to b.optInt("sdk",0).coerceIn(0,100),
+            "interactive" to b.optBoolean("interactive"),
+            "idle" to b.optBoolean("idle"),
+            "battery_exempt" to b.optBoolean("battery_exempt"),
+            "power_save" to b.optBoolean("power_save"),
+            "notifications_allowed" to b.optBoolean("notifications_allowed"),
+            "network" to b.optString("network").takeIf{it in setOf("wifi","cellular","other","none")}.orEmpty()
+        )} ?: JSONObject()),
         "limitations" to "HTTPS probes do not directly measure WireGuard handshake or UDP packet reception"
     )
 }
+

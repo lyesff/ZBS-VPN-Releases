@@ -8,17 +8,24 @@ WARP через AmneziaWG. Одна кнопка. Меньше барьеров.
 ![Android](https://img.shields.io/badge/Android-10%2B-3DDC84?logo=android&logoColor=white)
 ![Kotlin](https://img.shields.io/badge/Kotlin-Jetpack_Compose-7F52FF?logo=kotlin&logoColor=white)
 ![Go](https://img.shields.io/badge/Go-VPN_core-00ADD8?logo=go&logoColor=white)
-![Beta](https://img.shields.io/badge/Version-0.2.3.32_beta-35DBF1)
+![Beta](https://img.shields.io/badge/Version-0.2.3.38_beta-35DBF1)
 
-### [↓ Скачать APK для Android](https://github.com/lyesff/ZBS-VPN-Releases/releases/tag/v0.2.3.32-beta.1)
+### [↓ Скачать APK для Android](https://github.com/lyesff/ZBS-VPN-Releases/releases/tag/v0.2.3.38-beta.1)
 
 **Android 10+ · ARM64 / arm64-v8a · beta**
 
 </div>
 
+## Что нового в 0.2.3.38
+
+- Неоновое оформление со статичной иллюстрацией и компактной панелью скорости, задержки и времени.
+- Выбор Auto / QUIC / I1 / DNS / STUN / профиль на главном экране.
+- Разрешение на уведомление VPN на Android 13+ и расширенный журнал восстановления подключения.
+- Задержки доставки сообщений после длительного сна на отдельных устройствах ещё исследуются.
+
 ## Что умеет
 
-- **Подключение с маскировкой I1** — WARP через AmneziaWG.
+- **Автоподбор и ручной выбор маски** — WARP через AmneziaWG.
 - **Обход геоблокировок** — необязательный выбор DoH-провайдера или своего HTTPS-адреса. Доступность отдельных сервисов зависит от выбранного провайдера.
 - **Понятный статус** — внешний IP, HTTPS-проверка, время подключения и скорость входящего/исходящего трафика.
 - **Смена сети** — восстановление подключения при переходе между Wi-Fi и мобильной сетью.
@@ -26,9 +33,9 @@ WARP через AmneziaWG. Одна кнопка. Меньше барьеров.
 
 ## Установка за минуту
 
-1. Откройте [страницу beta](https://github.com/lyesff/ZBS-VPN-Releases/releases/tag/v0.2.3.32-beta.1) и скачайте **`ZBS-VPN-0.2.3.32-beta.1-arm64-v8a.apk`** из **Assets**.
+1. Откройте [страницу beta](https://github.com/lyesff/ZBS-VPN-Releases/releases/tag/v0.2.3.38-beta.1) и скачайте **`ZBS-VPN-0.2.3.38-background-arm64-v8a.apk`** из **Assets**.
 2. Установите APK, откройте ZBS VPN и создайте либо импортируйте профиль.
-3. Нажмите **«Подключить с маскировкой»** и подтвердите системное разрешение VPN.
+3. Нажмите основную кнопку подключения и подтвердите системное разрешение VPN.
 4. Если нужный сервис ограничивает доступ по региону, выберите DNS в **«Обход геоблокировок»** при отключённом VPN и подключитесь заново.
 
 Архивы исходников на телефон устанавливать не нужно. Для использования DNS приложения в Chrome выберите DNS системы / текущего поставщика: собственный DNS браузера и Android «Частный DNS» могут переопределять настройки приложения.
@@ -60,14 +67,14 @@ WARP через AmneziaWG. Одна кнопка. Меньше барьеров.
 | [`BUILDING.md`](BUILDING.md) | Инструменты и команды сборки |
 | [`docs/android-build-reference.yml`](docs/android-build-reference.yml) | Справочный рецепт CI-сборки |
 
-Опубликован снимок исходников выпущенной **0.2.3.32 (61)**. Архив соответствующих исходников также приложен к релизу. Сборка своей копии использует собственную подпись; ключ подписи распространяемого APK в репозиторий не входит.
+Опубликован снимок исходников выпущенной **0.2.3.38-background (67)**. Соответствующие исходники доступны в Source code (zip / tar.gz) на странице релиза. Сборка своей копии использует собственную подпись; ключ подписи распространяемого APK в репозиторий не входит.
 
 ## Проверка загрузки
 
-В Assets релиза есть **`SHA256SUMS`** и **`BUILD_INFO.json`**. Для проверки APK в PowerShell:
+В Assets релиза есть **`SHA256SUMS`**; сведения о сборке — в [BUILD_INFO.json](BUILD_INFO.json). Для проверки APK в PowerShell:
 
 ```powershell
-Get-FileHash .\ZBS-VPN-0.2.3.32-beta.1-arm64-v8a.apk -Algorithm SHA256
+Get-FileHash .\ZBS-VPN-0.2.3.38-background-arm64-v8a.apk -Algorithm SHA256
 ```
 
 ## Обратная связь

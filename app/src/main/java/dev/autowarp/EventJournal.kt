@@ -31,6 +31,30 @@ internal fun eventText(event:JSONObject):String {
         else->"HTTPS-проверка не прошла"
     }
     return when(code){
+        "awg_vpn_watchdog_failed"->"Фоновая проверка HTTPS не прошла"+(if(i>0)" · подряд $i" else "")+": "+awgVerifyErrorText(event.optString("error"))
+        "awg_vpn_network_wait"->"Физическая сеть недоступна; ожидаем сеть"
+        "awg_vpn_network_changed"->"Физическая сеть сменилась; начинаем восстановление VPN"
+        "awg_vpn_wifi_preferred"->"Wi-Fi прошёл проверку; переключаем VPN на Wi-Fi"
+        "awg_vpn_wifi_probe_failed"->"Проверка возврата на Wi-Fi не прошла"
+        "awg_vpn_network_monitor_unavailable"->"Не удалось зарегистрировать наблюдение за сетью"
+        "awg_screen_off"->"Экран выключен"
+        "awg_screen_on"->"Экран включён"
+        "awg_idle_enter"->"Android сообщил о входе в Doze"
+        "awg_idle_exit"->"Android сообщил о выходе из Doze"
+        "awg_battery_exempt"->"Системное исключение из оптимизации батареи включено"
+        "awg_battery_optimized"->"Системное исключение из оптимизации батареи не включено"
+        "awg_notifications_enabled"->"Уведомления VPN разрешены"
+        "awg_notifications_disabled"->"Уведомления VPN скрыты системной настройкой или разрешением"
+        "awg_background_monitor_started"->"Наблюдение за сном и пробуждением включено"
+        "awg_background_monitor_unavailable"->"Не удалось зарегистрировать наблюдение за сном"
+        "awg_vpn_network_blocked"->"Android сообщил о блокировке физической сети для приложения"
+        "awg_vpn_network_unblocked"->"Android сообщил, что физическая сеть не заблокирована"
+        "awg_vpn_network_suspended"->"Физическая сеть помечена системой как приостановленная"
+        "awg_vpn_network_resumed"->"Физическая сеть помечена системой как активная"
+        "awg_vpn_recovery_start"->"Автоматическое восстановление: закрываем прежний туннель"
+        "awg_vpn_user_stop"->"Получена пользовательская команда отключения VPN"
+        "awg_vpn_permission_revoked"->"Android отозвал разрешение VPN"
+        "awg_vpn_service_destroyed"->"VPN-служба завершает работу"
         "awg_doh_start"->"Обход геоблокировок: запускаем DNS over HTTPS через WARP"
         "awg_doh_ready"->"DNS over HTTPS ответил через WARP; доступ к отдельным сервисам зависит от провайдера"
         "awg_doh_failed"->"DNS over HTTPS не ответил корректно. Выберите другого провайдера или выключите обход геоблокировок"
@@ -65,6 +89,7 @@ internal fun eventText(event:JSONObject):String {
         "awg_nested_meta_node"->"Двойной WARP · Speedtest: узел — "+event.optString("error").removePrefix("awg_colo_")
         "awg_nested_done"->AwgNestedResult.text(event.optString("error"))
         "awg_vpn_start"->"AWG VPN: запуск системного туннеля"
+        "awg_vpn_mask_retry"->"Авто: пробуем следующую маскировку · попытка $i"
         "awg_node_scan_start"->"AWG: предварительный HTTPS-подбор узлов Cloudflare; это ещё не проверка туннеля"
         "awg_node_scan_done"->"AWG: найдено кандидатов европейского узла: $i; дальше проверяем настоящий AWG"
         "awg_vpn_trace_node"->"AWG: узел HTTPS-проверки Cloudflare — "+event.optString("error").removePrefix("awg_colo_").let {if(it=="unknown")"не определён" else it}
@@ -73,6 +98,9 @@ internal fun eventText(event:JSONObject):String {
         "awg_picker_exhausted"->"AWG: среди проверенных точек подходящая не найдена; сохранённый профиль не изменён"
         "awg_picker_saved"->"AWG: новая точка сохранена после подтверждения системного HTTPS и WARP"
         "awg_vpn_mask_original"->"AWG: исходная маскировка сохранённого профиля"
+        "awg_vpn_mask_quic"->"AWG: QUIC I1, новый пакет этого запуска"
+        "awg_vpn_mask_dns"->"AWG: DNS I1, новый пакет этого запуска"
+        "awg_vpn_mask_stun"->"AWG: STUN I1, новый пакет этого запуска"
         "awg_vpn_mask_router_i1"->"AWG: встроенная маскировка I1"
         "awg_vpn_scope_app"->"AWG: тест только AutoWARP; трафик других приложений исключён из туннеля"
         "awg_vpn_scope_all"->"AWG: системный VPN для всех приложений"
@@ -247,3 +275,4 @@ internal fun awgVerifyErrorText(code:String):String=when(code){
     "awg_vpn_doh_failed"->"выбранный DNS over HTTPS недоступен; выберите другого провайдера или выключите обход геоблокировок"
     else->"проверка не прошла"
 }
+

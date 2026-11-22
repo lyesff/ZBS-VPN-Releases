@@ -1,16 +1,12 @@
-# Local builds and tools
-.gradle/
-.kotlin/
 **/build/
-local.properties
-.core-build/
-app/libs/*.aar
-.idea/
-*.iml
-# Credentials and user profiles
+**/.gradle/
+**/.kotlin/
+**/.core-build/
+*.apk
+*.aab
+*.aar
 *.jks
 *.keystore
-*.p12
-*.pem
-*.conf
+local.properties
 .env
+*.conf

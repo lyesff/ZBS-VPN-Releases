@@ -8,7 +8,7 @@ require(nativeAbi in setOf("arm64-v8a","x86_64"))
 android {
     namespace="dev.autowarp"
     compileSdk=35
-    defaultConfig { applicationId="dev.autowarp"; minSdk=29; targetSdk=35; versionCode=61; versionName="0.2.3.32"; testInstrumentationRunner="androidx.test.runner.AndroidJUnitRunner"; ndk { abiFilters += nativeAbi } }
+    defaultConfig { applicationId="dev.autowarp"; minSdk=29; targetSdk=35; versionCode=67; versionName="0.2.3.38-background"; testInstrumentationRunner="androidx.test.runner.AndroidJUnitRunner"; ndk { abiFilters += nativeAbi } }
     buildFeatures { compose=true }
     testOptions { unitTests.isIncludeAndroidResources=true }
     packaging { jniLibs.useLegacyPackaging=true; dex.useLegacyPackaging=true }
@@ -51,9 +51,13 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation("org.json:json:20240303")
 }
 tasks.withType<Test>().configureEach {
+    systemProperty("neon.screenshotDir",layout.buildDirectory.dir("reports/neon").get().asFile.absolutePath)
     providers.gradleProperty("fixtureDir").orNull?.let { systemProperty("autowarp.fixtures", it) }
 }
+
 

@@ -1,0 +1,13 @@
+{
+  "release": "v0.2.3.38-beta.1",
+  "versionName": "0.2.3.38-background",
+  "versionCode": 67,
+  "sourceCommit": "d03d64705120021935ce6cf8024ab8c7d4ec2b45",
+  "ciRun": 43931317978,
+  "apk": "ZBS-VPN-0.2.3.38-background-arm64-v8a.apk",
+  "apkSHA256": "9f40c15c2f6ba5c20012caeca7e168993e0b7fa8179ba5edc404705ee0273179",
+  "signerCertificateSHA256": "e53f00edef80df7d5957133ad9b6b6494a51f86099ff4611e0ec430c566c3ae9",
+  "minSdk": 29,
+  "abi": "arm64-v8a",
+  "rebuiltForPublicRelease": false
+}

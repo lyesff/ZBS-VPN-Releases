@@ -23,12 +23,17 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.view.WindowCompat
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.work.*
 import io.nekohasekai.awglab.Awglab
 import kotlinx.coroutines.*
@@ -84,6 +89,10 @@ class Model(app:Application):AndroidViewModel(app){
         if(id=="custom")require(AwgDnsPolicy.customUrl(custom)!=null)
         store.edit{it.put("awgDohProvider",id).put("awgDohCustom",custom)}
     }
+    internal fun connectMode(mode:AwgConnectMode)=action("Маскировка: ${mode.label}"){
+        check(!Tunnel.live.value.running)
+        store.edit{it.put("awgConnectMode",mode.id)}
+    }
     fun load(uri:Uri,wg:Boolean)=action("Импорт завершён",true){
         val value=getApplication<Application>().contentResolver.openInputStream(uri)!!.use {boundedLocalText(it)}
         if(wg)store.warp(value) else store.source("Файл "+digest(value).take(6),"",value)
@@ -125,7 +134,11 @@ class Model(app:Application):AndroidViewModel(app){
     }
     fun export(uri:Uri,wg:Boolean)=action("Экспорт завершён"){
         val s=store.read();val text=if(wg)s.map("wg").getJSONObject(s.getString("warp")).getString("ini")
-        else diagnosticReport(s,Tunnel.live.value.state).toString(2)
+        else {
+            val app=getApplication<Application>()
+            val version=runCatching{app.packageManager.getPackageInfo(app.packageName,0).versionName}.getOrNull().orEmpty()
+            diagnosticReport(s,Tunnel.live.value.state,version).toString(2)
+        }
         getApplication<Application>().contentResolver.openOutputStream(uri,"wt")!!.use {it.write(text.toByteArray())}
     }
     fun checkTun()=action("HTTPS и DNS через Android VPN работают"){
@@ -143,15 +156,22 @@ class MainActivity:ComponentActivity(){
     internal val statusReady get()=observer.synced
     override fun onStart(){super.onStart();observer.start()}
     override fun onStop(){observer.stop();super.onStop()}
-    override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);setContent {
-        MaterialTheme(colorScheme=darkColorScheme(primary=Color(0xff8ce9c1),secondary=Color(0xffbfd2ff),background=Color(0xff0e1519),surface=Color(0xff172025))){Screen(this)}
+    override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState)
+        window.statusBarColor=0xff040C14.toInt()
+        window.navigationBarColor=0xff06121B.toInt()
+        WindowCompat.getInsetsController(window,window.decorView).apply{
+            isAppearanceLightStatusBars=false;isAppearanceLightNavigationBars=false
+        }
+        setContent {
+        NeonTheme{Screen(this)}
     }}
 }
 @Composable private fun Action(text:String,enabled:Boolean=true,click:()->Unit){OutlinedButton(onClick=click,enabled=enabled,modifier=Modifier.fillMaxWidth()){Text(text)}}
 @Composable private fun Toggle(text:String,value:Boolean,change:(Boolean)->Unit){Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text(text,Modifier.weight(1f));Switch(value,change)}}
-@Composable private fun Choice(label:String,value:String,items:List<String>,change:(String)->Unit){
+@Composable private fun Choice(label:String,value:String,items:List<String>,enabled:Boolean=true,change:(String)->Unit){
     var open by remember {mutableStateOf(false)}
-    Box{Action("$label · $value"){open=true};DropdownMenu(open,{open=false}){items.forEach {v->DropdownMenuItem(text={Text(v)},onClick={open=false;change(v)})}}}
+    Box{NeonControlRow(label,value,enabled=enabled,onClick={open=true})
+        DropdownMenu(open && enabled,{open=false}){items.forEach {v->DropdownMenuItem(text={Text(v)},onClick={open=false;change(v)})}}}
 }
 @Composable private fun Screen(activity:MainActivity,vm:Model=viewModel()){
     val state by vm.data.collectAsState();val live by Tunnel.live.collectAsState();val busy by vm.busy.collectAsState();val msg by vm.message.collectAsState()
@@ -160,6 +180,7 @@ class MainActivity:ComponentActivity(){
     val ready by activity.statusReady.collectAsState()
     val legacyAvailable=remember(s){hasProfile(s)}
     val awgAvailable=remember(s){s.optString("awgQuick").isNotBlank()}
+    val connectMode=AwgConnectMode.selected(s.optString("awgConnectMode"))
     var showDiagnostics by rememberSaveable {mutableStateOf(false)}
     var showProfileDetails by rememberSaveable {mutableStateOf(false)}
     var showLegacySettings by rememberSaveable {mutableStateOf(false)}
@@ -183,6 +204,27 @@ class MainActivity:ComponentActivity(){
         vm.message.value=if(awgActive)"Проверяем текущее подключение через HTTPS…" else "Проверка маршрутов запрошена; результат в журнале."
         Tunnel.cmd(activity,"CHECK")
     }
+    val notificationPrefs=remember(activity){activity.getSharedPreferences("vpn_notification_ui",0)}
+    val notificationPermission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()){granted->
+        vm.message.value=if(granted)"Уведомление VPN разрешено" else "Уведомление VPN можно разрешить в настройках Android"
+        Tunnel.cmd(activity,"REFRESH_NOTIFICATION")
+    }
+    fun manageNotifications(){
+        if(Build.VERSION.SDK_INT>=33 && !notificationPrefs.getBoolean("asked",false) &&
+            ContextCompat.checkSelfPermission(activity,android.Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED){
+            notificationPrefs.edit().putBoolean("asked",true).apply()
+            notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }else activity.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE,activity.packageName))
+    }
+    LaunchedEffect(ready,live.phase){
+        if(ready && live.phase==Phase.CONNECTED && Build.VERSION.SDK_INT>=33 &&
+            !notificationPrefs.getBoolean("asked",false) &&
+            ContextCompat.checkSelfPermission(activity,android.Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED){
+            notificationPrefs.edit().putBoolean("asked",true).apply()
+            notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val consent=rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()){r->
         if(r.resultCode==Activity.RESULT_OK)vm.withProfile { Tunnel.cmd(activity,"START") } else vm.message.value="Разрешение VPN отклонено"
     }
@@ -190,19 +232,21 @@ class MainActivity:ComponentActivity(){
         val intent=VpnService.prepare(activity)
         if(intent==null)Tunnel.cmd(activity,"START") else consent.launch(intent)
     }
-    var diagnosticRouterI1 by rememberSaveable {mutableStateOf(true)}
+    var diagnosticMask by rememberSaveable {mutableStateOf("Встроенная I1")}
+    var pendingAwgMask by rememberSaveable {mutableStateOf("")}
     var pendingAwgRouterI1 by rememberSaveable {mutableStateOf(true)}
     var pendingAwgAppOnly by rememberSaveable {mutableStateOf(false)}
     val awgConsent=rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()){r->
-        if(r.resultCode==Activity.RESULT_OK)AwgTunnel.start(activity,pendingAwgAppOnly,pendingAwgRouterI1)
+        if(r.resultCode==Activity.RESULT_OK)AwgTunnel.start(activity,pendingAwgAppOnly,pendingAwgRouterI1,maskVariant=pendingAwgMask)
         else vm.message.value="Разрешение VPN отклонено"
     }
-    fun connectAWG(appOnly:Boolean=false,routerI1:Boolean=!s.optBoolean("awgImported",false)){
+    fun connectAWG(appOnly:Boolean=false,routerI1:Boolean=!s.optBoolean("awgImported",false),maskVariant:String=connectMode.id){
         if(!awgAvailable || vm.busy.value || Tunnel.live.value.running || !ready)return
         val intent=VpnService.prepare(activity)
         pendingAwgAppOnly=appOnly
         pendingAwgRouterI1=routerI1
-        if(intent==null)AwgTunnel.start(activity,appOnly,routerI1) else awgConsent.launch(intent)
+        pendingAwgMask=maskVariant
+        if(intent==null)AwgTunnel.start(activity,appOnly,routerI1,maskVariant=maskVariant) else awgConsent.launch(intent)
     }
     var attempted by rememberSaveable {mutableStateOf(false)}
     LaunchedEffect(ready){if(ready && !attempted){
@@ -229,42 +273,17 @@ class MainActivity:ComponentActivity(){
             dismissButton={TextButton(onClick={confirm=""}){Text("Отмена")}})
     }
     Scaffold(snackbarHost={SnackbarHost(snack)},bottomBar={
-        NavigationBar(containerColor=Color(0xff101D22)){
-            listOf(0,1,3).forEach { i ->
-                val selected=i==tab || (i==3 && tab==2)
-                NavigationBarItem(
-                    selected=selected,
-                    onClick={tab=i},
-                    icon={Text(listOf("◉","◇","⇄","⚙")[i],fontSize=23.sp,
-                        color=if(selected)Color(0xff74F0D2) else Color(0xff67AFAE))},
-                    label={Text(tabs[i])},
-                    colors=NavigationBarItemDefaults.colors(
-                        selectedIconColor=Color(0xff74F0D2),
-                        selectedTextColor=Color(0xffA1F5D9),
-                        unselectedIconColor=Color(0xff67AFAE),
-                        unselectedTextColor=Color(0xff86ADA9),
-                        indicatorColor=Color(0xff203B3C)))
-            }
-        }
+        NeonNavigationBar(tab){tab=it}
     }){pad->
-        key(tab){LazyColumn(Modifier.fillMaxSize().padding(pad),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+        key(tab){LazyColumn(Modifier.fillMaxSize().background(Neon.Background).padding(pad),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
             item{
-                if(tab==0)Column(verticalArrangement=Arrangement.spacedBy(2.dp)){
-                    Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(9.dp)){
-                        Text("ZBS",style=MaterialTheme.typography.headlineLarge,
-                            color=Color(0xff80F2D0))
-                        Text("VPN",style=MaterialTheme.typography.headlineLarge,
-                            color=Color(0xff54C4D8))
-                    }
-                    Text("ZERO BARRIERS SYSTEM",
-                        style=MaterialTheme.typography.labelSmall.copy(letterSpacing=1.5.sp),
-                        color=MaterialTheme.colorScheme.primary)
-                } else Text(tabs[tab],style=MaterialTheme.typography.headlineLarge)
+                if(tab==0)NeonBrand() else Text(tabs[tab],style=MaterialTheme.typography.headlineLarge)
             }
             if(tab==2)item{Action("← Вернуться в настройки"){tab=3}}
             if(busy)item{LinearProgressIndicator(Modifier.fillMaxWidth())}
             when(tab){
                 0->{
+                    item{NeonKarateBanner()}
                     item{
                         val events=s.optJSONArray("eventLog")
                         val eventCode=events?.optJSONObject(events.length()-1)?.optString("code").orEmpty()
@@ -278,11 +297,19 @@ class MainActivity:ComponentActivity(){
                             Phase.ERROR->if(awgAvailable)"Повторить подключение" else "Настроить VPN"
                             Phase.DISCONNECTED->if(awgAvailable)"Подключить с маскировкой" else "Настроить VPN"
                         }
-                        Button(onClick={
+                        NeonConnectButton(text=button,onClick={
                             if(live.running)Tunnel.cmd(activity,"STOP")
                             else if(awgAvailable)connectAWG() else tab=1
-                        },enabled=ready && live.phase!=Phase.DISCONNECTING && (live.running || !busy),
-                            modifier=Modifier.fillMaxWidth().height(64.dp)){Text(button)}
+                        },enabled=ready && live.phase!=Phase.DISCONNECTING && (live.running || !busy))
+                    }
+                    if(awgAvailable)item{
+                        Choice("Маскировка",connectMode.label,AwgConnectMode.entries.map{it.label},
+                            enabled=ready && !busy && !live.running && live.phase!=Phase.DISCONNECTING){label->
+                            vm.connectMode(AwgConnectMode.entries.first{it.label==label})
+                        }
+                        if(connectMode==AwgConnectMode.AUTO)Text(
+                            "Подбирает рабочую маску. Запоминает её отдельно для Wi-Fi и мобильной сети.",
+                            style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if(ready && live.phase==Phase.CONNECTED && awgActive){
                         item{
@@ -291,17 +318,17 @@ class MainActivity:ComponentActivity(){
                         }
                     }
                     if(awgAvailable)item{
-                        Action("Обход геоблокировок · "+AwgDnsPolicy.label(s)){showDns=true}
-                        Text("Помогает открыть отдельные сервисы через выбранного DNS-провайдера.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                        NeonControlRow("DNS (DoH)",AwgDnsPolicy.label(s),
+                            subtitle="Защищённый DNS и обход геоблокировок",glyph=NeonGlyph.GLOBE){showDns=true}
                     }
-                    if(awgAvailable && !live.running)item{Text(if(s.optBoolean("awgImported",false))"Маскировка · из импортированного файла" else "Маскировка · встроенная I1",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}
+                    item{NeonStatusStrip(ready && live.phase==Phase.CONNECTED && awgActive)}
                     if(!live.running || awgActive)item{Text("Подключение с маскировкой использует IPv4. IPv6 блокируется.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}
                     if(live.phase==Phase.ERROR)item{Action("Посмотреть причину"){
                         showDiagnostics=true;tab=3
                     }}
                 }
                 1->{
-                    item{Card(Modifier.fillMaxWidth()){Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+                    item{NeonCard(Modifier.fillMaxWidth()){Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
                         Text(if(awgAvailable)"Профиль готов" else "Профиль WARP",style=MaterialTheme.typography.titleLarge)
                         Text(if(awgAvailable)"Профиль сохранён на этом устройстве и готов к подключению."
                             else "ZBS VPN подготовит профиль автоматически. Также можно импортировать готовый файл.",style=MaterialTheme.typography.bodyMedium)
@@ -505,9 +532,10 @@ class MainActivity:ComponentActivity(){
                         Action((if(s.optString("server")==id)"✓ " else "")+p.getString("name")+" · "+status(health.optJSONObject("v-$id"))){vm.setting("server",id)}}
                 }
                 3->{
+                    item{Action("Уведомление о работе VPN"){manageNotifications()}}
                     item{Action("Обход геоблокировок · "+AwgDnsPolicy.label(s)){showDns=true}}
                     item{Toggle("Подключать при открытии приложения",s.optBoolean("auto")){vm.setting("auto",it)}}
-                    item{Card(Modifier.fillMaxWidth()){Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                    item{NeonCard(Modifier.fillMaxWidth()){Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
                         Text("Подключение с маскировкой",style=MaterialTheme.typography.titleMedium)
                         Text("Интернет через WARP. Сейчас поддерживается IPv4, IPv6 блокируется.",style=MaterialTheme.typography.bodySmall)
                     }}}
@@ -522,14 +550,22 @@ class MainActivity:ComponentActivity(){
                         item{Text("Диагностика AWG",style=MaterialTheme.typography.titleMedium)}
                         if(awgAvailable){
                             item{
-                                Choice("Маскировка для диагностики",if(diagnosticRouterI1)"Встроенная I1" else "Исходная",
-                                    listOf("Исходная","Встроенная I1")){diagnosticRouterI1=it=="Встроенная I1"}
-                                Text("Выбор применяется только к диагностическим кнопкам ниже. Основная кнопка сохраняет маскировку импортированного файла; для профиля ZBS VPN добавляет встроенную I1. Здесь можно явно выбрать диагностический вариант.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                                val diagnosticVariant=when(diagnosticMask){
+                                    "QUIC · новая I1"->"quic"
+                                    "DNS · новая I1"->"dns"
+                                    "STUN · новая I1"->"stun"
+                                    else->""
+                                }
+                                Choice("Маскировка для диагностики",diagnosticMask,
+                                    listOf("Встроенная I1","QUIC · новая I1","DNS · новая I1","STUN · новая I1","Исходная")){
+                                    if(!live.running && !busy)diagnosticMask=it
+                                }
+                                Text("QUIC, DNS и STUN создают новый пакет I1 при каждом запуске. Выбор здесь действует только на две диагностические кнопки ниже; основная кнопка использует маскировку с главного экрана. Ключи и точка входа сохраняются.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                                 Action("AWG: подключить выбранный вариант",ready && !busy && !live.running){
-                                    connectAWG(routerI1=diagnosticRouterI1)
+                                    connectAWG(routerI1=diagnosticMask=="Встроенная I1",maskVariant=diagnosticVariant)
                                 }
                                 Action("AWG: тест только ZBS VPN",ready && !busy && !live.running){
-                                    connectAWG(appOnly=true,routerI1=diagnosticRouterI1)
+                                    connectAWG(appOnly=true,routerI1=diagnosticMask=="Встроенная I1",maskVariant=diagnosticVariant)
                                 }
                                 Text("Тест только ZBS VPN не передаёт трафик других приложений и отключается после проверки HTTPS.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -539,7 +575,7 @@ class MainActivity:ComponentActivity(){
                     item{Text("Что проверяет ZBS VPN прямо сейчас. HTTPS через маршрут — не прямое измерение WireGuard-handshake.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}
                     val events=s.optJSONArray("eventLog")
                     if(events==null || events.length()==0)item{Text("Журнал пока пуст. Запустите подключение WARP.",style=MaterialTheme.typography.bodySmall)}
-                    else items((events.length()-1 downTo maxOf(0,events.length()-32)).toList()){ i->
+                    else items((events.length()-1 downTo maxOf(0,events.length()-96)).toList()){ i->
                         val record=events.optJSONObject(i)
                         if(record!=null)Text(eventLine(record),style=MaterialTheme.typography.bodySmall)
                     }
@@ -577,7 +613,7 @@ class MainActivity:ComponentActivity(){
 
                     }
                     item{
-                        Card(Modifier.fillMaxWidth()){
+                        NeonCard(Modifier.fillMaxWidth()){
                             Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(5.dp)){
                                 Text("О приложении",style=MaterialTheme.typography.titleMedium)
                                 Text("ZBS VPN",style=MaterialTheme.typography.titleLarge)
@@ -619,3 +655,4 @@ private fun status(h:JSONObject?)=when{
         else->if(h.optString("error").matches(Regex("probe_http_[0-9]{3}")))"ошибка HTTP ${h.optString("error").takeLast(3)}" else "нет ответа (причина неизвестна)"
     }
 }
+

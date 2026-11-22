@@ -20,6 +20,14 @@ PersistentKeepalive = 25
 """
     private val signature="<b 0xce00000001>"
 
+    @Test fun generatedSignaturesKeepEveryOtherConfigFieldUnchanged(){
+        for(mode in listOf("quic","dns","stun")){
+            val signature=AwgMaskPackets.signature(mode)
+            val changed=AwgMasking.withI1(original,signature)
+            assertEquals(original,changed.replace("I1 = $signature\n",""))
+            assertEquals(original.substringAfter("[Peer]"),changed.substringAfter("[Peer]"))
+        }
+    }
     @Test fun addsOnlyI1AndKeepsIdentityEndpointAndProtocolFields(){
         val changed=AwgMasking.withI1(original,signature)
         assertEquals(original,changed.replace("I1 = $signature\n",""))
